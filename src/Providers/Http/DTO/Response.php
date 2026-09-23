@@ -166,11 +166,14 @@ class Response extends AbstractDataTransferObject
     public function getBody(): ?string
     {
         if (!$this->bodyResolved) {
-            $this->bodyResolved = true;
             if ($this->stream !== null) {
                 $contents = $this->readStream($this->stream);
                 $this->body = $contents === '' ? null : $contents;
+                // The stream is consumed; serve any later getStream() call from the
+                // resolved string instead of handing out the drained stream.
+                $this->stream = null;
             }
+            $this->bodyResolved = true;
         }
 
         return $this->body;
@@ -178,6 +181,9 @@ class Response extends AbstractDataTransferObject
 
     /**
      * Gets the response body as a PSR-7 stream.
+     *
+     * Once getBody() has resolved a streamed body, the original stream is
+     * consumed and a new stream over the resolved string is returned instead.
      *
      * @since n.e.x.t
      *
