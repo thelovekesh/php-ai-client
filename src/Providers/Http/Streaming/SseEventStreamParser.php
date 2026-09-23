@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace WordPress\AiClient\Providers\Http\Streaming;
 
 use Psr\Http\Message\StreamInterface;
+use WordPress\AiClient\Common\Exception\RuntimeException;
 use WordPress\AiClient\Providers\Http\Streaming\Contracts\EventStreamParserInterface;
 use WordPress\AiClient\Providers\Http\Streaming\ValueObjects\ServerSentEvent;
 
@@ -38,6 +39,17 @@ final class SseEventStreamParser implements EventStreamParserInterface
      * @var string
      */
     private const BOM = "\xEF\xBB\xBF";
+
+    /**
+     * Maximum number of consecutive empty reads before the stream is treated as stalled.
+     *
+     * A blocking stream returns an empty string only when its read timeout fires
+     * before EOF; a non-blocking one can return it immediately and indefinitely.
+     * Without a bound the read loop would spin forever in the second case.
+     *
+     * @var int
+     */
+    private const MAX_CONSECUTIVE_EMPTY_READS = 100;
 
     /**
      * {@inheritDoc}
@@ -156,17 +168,27 @@ final class SseEventStreamParser implements EventStreamParserInterface
      *
      * @param StreamInterface $stream The response body stream.
      * @return \Generator<int, string> Complete lines, without terminators.
+     *
+     * @throws RuntimeException If the stream keeps returning no data without reaching EOF.
      */
     private function toLines(StreamInterface $stream): \Generator
     {
         $buffer = '';
         $bomChecked = false;
+        $emptyReads = 0;
 
         while (!$stream->eof()) {
             $chunk = $stream->read(self::READ_CHUNK_BYTES);
             if ($chunk === '') {
+                if (++$emptyReads >= self::MAX_CONSECUTIVE_EMPTY_READS) {
+                    throw new RuntimeException(
+                        'The event stream stalled: no data arrived in '
+                        . self::MAX_CONSECUTIVE_EMPTY_READS . ' consecutive reads.'
+                    );
+                }
                 continue;
             }
+            $emptyReads = 0;
 
             $buffer .= $chunk;
 
