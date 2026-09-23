@@ -679,4 +679,82 @@ class StreamedGenerativeAiResultTest extends TestCase
 
         $this->assertSame(1, $count);
     }
+
+    /**
+     * Tests that getFinalResult() called from inside the foreach fires onComplete only once.
+     */
+    public function testGetFinalResultInsideForeachFiresOnCompleteOnce(): void
+    {
+        $count = 0;
+        $handle = $this->createHandleFromChunks([
+            $this->createContentChunk('a'),
+            $this->createContentChunk('b', FinishReasonEnum::stop()),
+        ]);
+        $handle->onComplete(function () use (&$count) {
+            $count++;
+        });
+
+        $seen = 0;
+        $final = null;
+        foreach ($handle as $chunk) {
+            $seen++;
+            $final = $handle->getFinalResult();
+        }
+
+        $this->assertSame(1, $seen);
+        $this->assertSame(1, $count);
+        $this->assertSame('ab', $final->toText());
+        $this->assertSame($final, $handle->getFinalResult());
+    }
+
+    /**
+     * Tests that an exception thrown by an onComplete callback is not reported as a stream error.
+     */
+    public function testThrowingOnCompleteCallbackIsNotAStreamError(): void
+    {
+        $errors = 0;
+        $handle = $this->createHandleFromChunks([$this->createContentChunk('hi', FinishReasonEnum::stop())]);
+        $handle->onComplete(function (): void {
+            throw new \LogicException('listener failed');
+        });
+        $handle->onError(function () use (&$errors): void {
+            $errors++;
+        });
+
+        try {
+            foreach ($handle as $chunk) {
+                // Consume the stream.
+            }
+            $this->fail('The listener exception should propagate.');
+        } catch (\LogicException $e) {
+            $this->assertSame('listener failed', $e->getMessage());
+        }
+
+        $this->assertSame(0, $errors);
+        $this->assertSame('hi', $handle->getFinalResult()->toText());
+    }
+
+    /**
+     * Tests that an exception thrown by an onStart callback is not reported as a stream error.
+     */
+    public function testThrowingOnStartCallbackIsNotAStreamError(): void
+    {
+        $errors = 0;
+        $handle = $this->createHandleFromChunks([$this->createContentChunk('hi', FinishReasonEnum::stop())]);
+        $handle->onStart(function (): void {
+            throw new \LogicException('start listener failed');
+        });
+        $handle->onError(function () use (&$errors): void {
+            $errors++;
+        });
+
+        try {
+            $handle->getFinalResult();
+            $this->fail('The listener exception should propagate.');
+        } catch (\LogicException $e) {
+            $this->assertSame('start listener failed', $e->getMessage());
+        }
+
+        $this->assertSame(0, $errors);
+    }
 }

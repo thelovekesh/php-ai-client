@@ -46,9 +46,14 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
     private array $errorCallbacks = [];
 
     /**
-     * @var bool Whether the source stream has been started.
+     * @var bool Whether consumption has started (start callbacks have run).
      */
     private bool $started = false;
+
+    /**
+     * @var bool Whether the source iterator has been rewound.
+     */
+    private bool $sourceOpened = false;
 
     /**
      * @var bool Whether the source stream has been fully read.
@@ -142,6 +147,8 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
             );
         }
 
+        $this->start();
+
         try {
             while (true) {
                 $chunk = $this->pull();
@@ -150,12 +157,12 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
                 }
                 yield $chunk;
             }
-
-            $this->finalize();
         } catch (Throwable $e) {
             $this->fail($e);
             throw $e;
         }
+
+        $this->finalize();
     }
 
     /**
@@ -175,16 +182,18 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
         }
 
         if ($this->result === null) {
+            $this->start();
+
             try {
                 while ($this->pull() !== null) {
                     // Drain any remaining chunks so the result is complete.
                 }
-
-                $this->finalize();
             } catch (Throwable $e) {
                 $this->fail($e);
                 throw $e;
             }
+
+            $this->finalize();
         }
 
         if ($this->result === null) {
@@ -197,7 +206,11 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
     }
 
     /**
-     * Assembles the result and runs the completion callbacks.
+     * Assembles the result and runs the completion callbacks, once.
+     *
+     * Completion callbacks run outside the try/catch that reports stream
+     * failures, so an exception thrown by a callback propagates to the caller
+     * as an ordinary exception rather than being recorded as a stream error.
      *
      * @since n.e.x.t
      *
@@ -205,7 +218,7 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
      */
     private function finalize(): void
     {
-        if (!$this->accumulator->hasCandidates()) {
+        if ($this->result !== null || !$this->accumulator->hasCandidates()) {
             return;
         }
 
@@ -234,6 +247,29 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
     }
 
     /**
+     * Marks consumption as started and runs the start callbacks, once.
+     *
+     * Start callbacks run before the source is touched and outside the
+     * try/catch that reports stream failures, so an exception thrown by a
+     * callback propagates as an ordinary exception rather than a stream error.
+     *
+     * @since n.e.x.t
+     *
+     * @return void
+     */
+    private function start(): void
+    {
+        if ($this->started) {
+            return;
+        }
+
+        $this->started = true;
+        foreach ($this->startCallbacks as $callback) {
+            $callback();
+        }
+    }
+
+    /**
      * Reads the next chunk from the source and folds it into the accumulated state.
      *
      * @since n.e.x.t
@@ -246,11 +282,8 @@ final class StreamedGenerativeAiResult implements IteratorAggregate
             return null;
         }
 
-        if (!$this->started) {
-            $this->started = true;
-            foreach ($this->startCallbacks as $callback) {
-                $callback();
-            }
+        if (!$this->sourceOpened) {
+            $this->sourceOpened = true;
             $this->chunks->rewind();
         } else {
             $this->chunks->next();
