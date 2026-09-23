@@ -178,10 +178,24 @@ abstract class AbstractOpenAiCompatibleTextGenerationModel extends AbstractApiBa
         $response = $httpTransporter->send($request, $streamOptions);
         $this->throwIfNotSuccessful($response);
 
+        /*
+         * A connection that drops mid-stream reaches EOF without an exception, so
+         * the parser ends as if the response were complete. The protocol offers two
+         * completion signals: the `[DONE]` sentinel, and a finish_reason on every
+         * candidate. Require one of them before treating the stream as complete.
+         */
+        $doneSeen = false;
+        $candidatesSeen = [];
+        $candidatesFinished = [];
+
         try {
             foreach ($this->getEventStreamParser()->parse($response->getStream()) as $event) {
                 $data = $event->getData();
-                if ($data === '' || $data === '[DONE]') {
+                if ($data === '') {
+                    continue;
+                }
+                if ($data === '[DONE]') {
+                    $doneSeen = true;
                     continue;
                 }
 
@@ -194,14 +208,31 @@ abstract class AbstractOpenAiCompatibleTextGenerationModel extends AbstractApiBa
 
                 /** @var StreamEventData $decoded */
                 $chunk = $this->parseStreamEvent($decoded);
-                if ($chunk !== null) {
-                    yield $chunk;
+                if ($chunk === null) {
+                    continue;
                 }
+
+                foreach ($chunk->getCandidateDeltas() as $candidateDelta) {
+                    $candidatesSeen[$candidateDelta->getIndex()] = true;
+                    if ($candidateDelta->getFinishReason() !== null) {
+                        $candidatesFinished[$candidateDelta->getIndex()] = true;
+                    }
+                }
+
+                yield $chunk;
             }
         } catch (ResponseException $e) {
             throw $e;
         } catch (\RuntimeException $e) {
             throw ResponseException::fromStreamError($this->providerMetadata()->getName(), $e->getMessage(), $e);
+        }
+
+        $allFinished = $candidatesSeen !== [] && count($candidatesFinished) === count($candidatesSeen);
+        if (!$doneSeen && !$allFinished) {
+            throw ResponseException::fromStreamError(
+                $this->providerMetadata()->getName(),
+                'The stream ended before the response was complete.'
+            );
         }
     }
 

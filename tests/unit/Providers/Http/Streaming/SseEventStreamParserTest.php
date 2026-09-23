@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace WordPress\AiClient\Tests\unit\Providers\Http\Streaming;
 
 use PHPUnit\Framework\TestCase;
+use WordPress\AiClient\Common\Exception\RuntimeException;
 use WordPress\AiClient\Providers\Http\Streaming\SseEventStreamParser;
 use WordPress\AiClient\Providers\Http\Streaming\ValueObjects\ServerSentEvent;
 use WordPress\AiClient\Tests\mocks\ChunkStream;
@@ -545,5 +546,50 @@ class SseEventStreamParserTest extends TestCase
         $generator->next();
         $this->assertSame('2', $generator->current()->getData());
         $this->assertSame(2, $stream->getReadCount());
+    }
+
+    /**
+     * Tests that a stream which keeps returning no data without reaching EOF is reported as stalled.
+     *
+     * @return void
+     */
+    public function testStalledStreamThrowsInsteadOfSpinning(): void
+    {
+        $stream = new class ([]) extends ChunkStream {
+            public int $reads = 0;
+
+            public function eof(): bool
+            {
+                return false;
+            }
+
+            public function read(int $length): string
+            {
+                $this->reads++;
+                return '';
+            }
+        };
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('stalled');
+
+        try {
+            iterator_to_array((new SseEventStreamParser())->parse($stream), false);
+        } finally {
+            $this->assertSame(100, $stream->reads);
+            $this->assertTrue($stream->isClosed());
+        }
+    }
+
+    /**
+     * Tests that empty reads interleaved with data do not count as a stall.
+     *
+     * @return void
+     */
+    public function testEmptyReadsBetweenDataAreTolerated(): void
+    {
+        $chunks = array_merge(array_fill(0, 50, ''), ["data: a\n\n"], array_fill(0, 50, ''), ["data: b\n\n"]);
+
+        $this->assertSame(['a', 'b'], $this->dataOf($this->parse($chunks)));
     }
 }

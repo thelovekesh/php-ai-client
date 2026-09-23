@@ -284,6 +284,9 @@ class HttpTransporter implements HttpTransporterInterface
 
         if ($options->isStream() === true) {
             $guzzleOptions['stream'] = true;
+            // Guzzle throws on 4xx/5xx by default, which would bypass the SDK's own
+            // status handling (throwIfNotSuccessful). Return the response instead.
+            $guzzleOptions['http_errors'] = false;
         }
 
         return $guzzleOptions;
@@ -327,6 +330,7 @@ class HttpTransporter implements HttpTransporterInterface
      * @since 0.1.0
      *
      * @param ResponseInterface $psr7Response The PSR-7 response.
+     * @param bool $stream Whether to pass the body through as a lazily-read stream instead of buffering it.
      * @return Response The custom response.
      */
     private function convertFromPsr7Response(ResponseInterface $psr7Response, bool $stream): Response

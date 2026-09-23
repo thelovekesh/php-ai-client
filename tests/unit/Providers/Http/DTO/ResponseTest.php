@@ -157,4 +157,50 @@ class ResponseTest extends TestCase
         $this->assertSame(200, $array[Response::KEY_STATUS_CODE]);
         $this->assertSame('streamed body', $array[Response::KEY_BODY]);
     }
+
+    /**
+     * Tests that getStream() serves the resolved body after getBody() consumed a non-seekable stream.
+     *
+     * @return void
+     */
+    public function testGetStreamAfterGetBodyServesTheResolvedBody(): void
+    {
+        $stream = new ChunkStream(['{"ok":', 'true}']);
+        $response = new Response(200, [], $stream);
+
+        $this->assertSame('{"ok":true}', $response->getBody());
+        $this->assertNotSame($stream, $response->getStream());
+        $this->assertSame('{"ok":true}', $response->getStream()->getContents());
+        $this->assertSame('{"ok":true}', $response->getBody());
+    }
+
+    /**
+     * Tests that a failed stream read does not mark the body as resolved.
+     *
+     * @return void
+     */
+    public function testFailedStreamReadIsNotCachedAsAnEmptyBody(): void
+    {
+        $stream = new class (['unused']) extends ChunkStream {
+            public int $attempts = 0;
+
+            public function getContents(): string
+            {
+                $this->attempts++;
+                throw new \RuntimeException('read failed');
+            }
+        };
+        $response = new Response(200, [], $stream);
+
+        foreach ([1, 2] as $attempt) {
+            try {
+                $response->getBody();
+                $this->fail('getBody() should rethrow the read failure.');
+            } catch (\RuntimeException $e) {
+                $this->assertSame('read failed', $e->getMessage());
+            }
+        }
+
+        $this->assertSame(2, $stream->attempts);
+    }
 }
