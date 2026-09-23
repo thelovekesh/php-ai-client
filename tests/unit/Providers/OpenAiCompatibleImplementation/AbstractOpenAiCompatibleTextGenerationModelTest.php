@@ -2203,4 +2203,89 @@ class AbstractOpenAiCompatibleTextGenerationModelTest extends TestCase
 
         $this->assertSame(['object' => 'chat.completion.chunk', 'system_fingerprint' => 'fp_1'], $data);
     }
+
+    /**
+     * Tests that a stream ending before any completion signal is reported as an error, not a result.
+     */
+    public function testStreamEndingWithoutCompletionSignalThrows(): void
+    {
+        $this->givenStreamResponse($this->createStreamResponse([
+            $this->createSseDataLine(['choices' => [['index' => 0, 'delta' => ['content' => 'Hel']]]]),
+        ]));
+
+        $handle = $this->createModel()->streamGenerateTextResult($this->createStreamPrompt());
+        $errors = [];
+        $handle->onError(function (\Throwable $e) use (&$errors): void {
+            $errors[] = $e;
+        });
+
+        $collected = [];
+        $thrown = null;
+        try {
+            foreach ($handle as $chunk) {
+                $collected[] = $chunk;
+            }
+        } catch (ResponseException $e) {
+            $thrown = $e;
+        }
+
+        $this->assertCount(1, $collected);
+        $this->assertSame('Hel', $collected[0]->getDeltaText());
+        $this->assertInstanceOf(ResponseException::class, $thrown);
+        $this->assertStringContainsString('ended before the response was complete', $thrown->getMessage());
+        $this->assertSame([$thrown], $errors);
+
+        $this->expectException(ResponseException::class);
+        $handle->getFinalResult();
+    }
+
+    /**
+     * Tests that a finish_reason on every candidate completes the stream without a [DONE] sentinel.
+     */
+    public function testStreamCompletesOnFinishReasonWithoutDoneSentinel(): void
+    {
+        $this->givenStreamResponse($this->createStreamResponse([
+            $this->createSseDataLine(['choices' => [['index' => 0, 'delta' => ['content' => 'Hi']]]]),
+            $this->createSseDataLine([
+                'choices' => [['index' => 0, 'delta' => [], 'finish_reason' => 'stop']],
+            ]),
+        ]));
+
+        $result = $this->createModel()->streamGenerateTextResult($this->createStreamPrompt())->getFinalResult();
+
+        $this->assertSame('Hi', $result->toText());
+    }
+
+    /**
+     * Tests that a [DONE] sentinel completes the stream even when no finish_reason was sent.
+     */
+    public function testStreamCompletesOnDoneSentinelWithoutFinishReason(): void
+    {
+        $this->givenStreamResponse($this->createStreamResponse([
+            $this->createSseDataLine(['choices' => [['index' => 0, 'delta' => ['content' => 'Hi']]]]),
+            "data: [DONE]\n\n",
+        ]));
+
+        $result = $this->createModel()->streamGenerateTextResult($this->createStreamPrompt())->getFinalResult();
+
+        $this->assertSame('Hi', $result->toText());
+        $this->assertTrue($result->getCandidates()[0]->getFinishReason()->is(FinishReasonEnum::stop()));
+    }
+
+    /**
+     * Tests that a multi-candidate stream is incomplete until every candidate reports a finish_reason.
+     */
+    public function testStreamWithOneUnfinishedCandidateThrows(): void
+    {
+        $this->givenStreamResponse($this->createStreamResponse([
+            $this->createSseDataLine(['choices' => [
+                ['index' => 0, 'delta' => ['content' => 'A'], 'finish_reason' => 'stop'],
+                ['index' => 1, 'delta' => ['content' => 'B']],
+            ]]),
+        ]));
+
+        $this->expectException(ResponseException::class);
+        $this->expectExceptionMessage('ended before the response was complete');
+        $this->createModel()->streamGenerateTextResult($this->createStreamPrompt())->getFinalResult();
+    }
 }
