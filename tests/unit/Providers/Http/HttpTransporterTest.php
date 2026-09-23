@@ -531,4 +531,48 @@ class HttpTransporterTest extends TestCase
 
         $this->assertSame($body, $result->getStream());
     }
+
+    /**
+     * Tests that a streamed request disables Guzzle's own HTTP error throwing so the SDK maps the status.
+     *
+     * @return void
+     */
+    public function testStreamDisablesGuzzleHttpErrorsSoStatusReachesTheResponse(): void
+    {
+        $guzzleClient = new GuzzleLikeClient(new Psr7Response(429, [], '{"error":"slow down"}'));
+        $transporter = $this->createGuzzleTransporter($guzzleClient);
+
+        $options = new RequestOptions();
+        $options->setStream(true);
+
+        $request = new Request(HttpMethodEnum::GET(), 'https://api.example.com/stream');
+        $result = $transporter->send($request, $options);
+
+        $lastOptions = $guzzleClient->getLastOptions();
+        $this->assertIsArray($lastOptions);
+        $this->assertFalse($lastOptions['http_errors']);
+        $this->assertSame(429, $result->getStatusCode());
+        $this->assertSame('{"error":"slow down"}', $result->getBody());
+    }
+
+    /**
+     * Tests that a buffered request leaves Guzzle's HTTP error handling untouched.
+     *
+     * @return void
+     */
+    public function testNonStreamGuzzleRequestLeavesHttpErrorsUntouched(): void
+    {
+        $guzzleClient = new GuzzleLikeClient(new Psr7Response(200, [], 'ok'));
+        $transporter = $this->createGuzzleTransporter($guzzleClient);
+
+        $options = new RequestOptions();
+        $options->setTimeout(5.0);
+
+        $request = new Request(HttpMethodEnum::GET(), 'https://api.example.com/buffered');
+        $transporter->send($request, $options);
+
+        $lastOptions = $guzzleClient->getLastOptions();
+        $this->assertIsArray($lastOptions);
+        $this->assertArrayNotHasKey('http_errors', $lastOptions);
+    }
 }
